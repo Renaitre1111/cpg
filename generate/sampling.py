@@ -109,8 +109,8 @@ def create_image_grid(images, grid_size, save_path):
     return grid_img
 
 if __name__ == "__main__":
-    model_path = "generate/pretrain_weights/checkpoint-86000/unet_ema"
-    scheduler_path = "generate/pretrain_weights/scheduler"
+    model_path = "generate/pretrained_weights_cifar10/unet"
+    scheduler_path = "generate/pretrained_weights_cifar10/scheduler"
     num_classes = 10  # Adjust to your number of classes
     batch_size = 64
     num_inference_steps = 1000 # Can be as low as 50 for faster generation

@@ -1,6 +1,13 @@
 import torch
 import torch.nn.functinal as F
+from diffusers import UNet2DModel, DDPMScheduler
+from diffusers.pipelines.pipeline_utils import DiffusionPipeline, ImagePipelineOutput
+from diffusers.utils.torch_utils import randn_tensor
+from typing import List, Optional, Tuple, Union
+import math
+from PIL import Image
 
+# Reliable Sample Screening Module
 @torch.no_grad()
 def get_max_confidence_and_residual_variance(predictions):
     # predictions [N, C]
@@ -80,3 +87,103 @@ def _compute_class_centers(features, class_assignments, num_classes):
         means.append(mean)
         vars.append(var)
     return torch.stack(means), torch.stack(vars)
+
+
+# Diffusion Sampling Module
+class DDPMPipelinenew(DiffusionPipeline):
+    def __init__(self, unet, scheduler, num_classes: int):
+        super.__init__()
+        self.register_modules(unet=unet, scheduler=scheduler)
+        self.num_classes = num_classes
+        self._device = unet.device  # Ensure the pipeline knows the device
+    
+    @torch.no_grad()
+    def __call__(
+        self,
+        batch_size: int = 64,
+        class_labels: Optional[torch.Tensor] = None,
+        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+        num_inference_steps: int = 1000,
+        output_type: Optional[str] = "pil",
+        return_dict: bool = True,
+    ) -> Union[ImagePipelineOutput, Tuple]:
+        class_labels = class_labels.to(self._device)
+        if class_labels.ndim == 0:
+            class_labels = class_labels.unsqueeze(0).expand(batch_size)
+        else:
+            class_labels = class_labels.expand(batch_size)
+        
+        # Sample gaussian noise to begin loop
+        if isinstance(self.unet.config.sample_size, int):
+            image_shape = (
+                batch_size,
+                self.unet.config.in_channels,
+                self.unet.config.sample_size,
+                self.unet.config.sample_size,
+            )
+        else:
+            image_shape = (batch_size, self.unet.config.in_channels, *self.unet.config.sample_size)
+
+        image = randn_tensor(image_shape, generator=generator, device=self._device)
+
+        # Set step values
+        self.scheduler.set_timesteps(num_inference_steps)
+
+        for t in self.progress_bar(self.scheduler.timesteps):
+            # Ensure the class labels are correctly broadcast to match the input tensor shape
+            model_output = self.unet(image, t, class_labels).sample
+
+            image = self.scheduler.step(model_output, t, image, generator=generator).prev_sample
+
+        image = (image / 2 + 0.5).clamp(0, 1)
+        image = image.cpu().permute(0, 2, 3, 1).numpy()
+        if output_type == "pil":
+            image = self.numpy_to_pil(image)
+
+        if not return_dict:
+            return (image,)
+
+        return ImagePipelineOutput(images=image)
+    
+def load_diffusion_pipeline(model_path, scheduler_path, num_classes, device):
+    unet = UNet2DModel.from_pretrained(model_path).to(device)
+    scheduler = DDPMScheduler.from_pretrained(scheduler_path)
+    pipeline = DDPMPipelinenew(unet=unet, scheduler=scheduler, num_classes=num_classes)
+    return pipeline.to(device)  # Move the entire pipeline to the device
+
+@torch.no_grad()
+def sample_diffusion_data(pipeline, classes_to_sample, num_samples_per_class: List[int], batch_size=64, num_inference_steps=1000):
+    all_gen_imgs = []
+    all_gen_labels = []
+    device = pipeline.device
+
+    print(f"sampling for {len(classes_to_sample)} classes")
+
+    for class_label, num_samples in zip(classes_to_sample, num_samples_per_class):
+        if num_samples <= 0:
+            continue
+
+        num_generated = 0
+        num_batches = math.ceil(num_samples / batch_size)
+        for i in range(num_batches):
+            current_batch_size = min(batch_size, num_samples - num_generated)
+            if current_batch_size <= 0:
+                continue
+            labels = torch.tensor([class_label] * current_batch_size, device=device, dtype=torch.long)
+            imgs_output = pipeline(
+                batch_siz=current_batch_size,
+                class_labels=labels,
+                num_inference_steps=num_inference_steps,
+                output_type="pil"
+            )
+
+            gen_imgs_batch = imgs_output.images
+
+            all_gen_imgs.extend(gen_imgs_batch)
+            all_gen_labels.extend([class_label] * current_batch_size)
+            num_generated += current_batch_size
+        
+    return all_gen_imgs, all_gen_labels
+
+        
+

@@ -16,10 +16,10 @@ from semilearn.datasets.augmentation import RandAugment
 from semilearn.algorithms.hooks import PseudoLabelingHook
 from semilearn.algorithms.utils import SSL_Argument, str2bool
 from semilearn.datasets.cv_datasets.datasetbase import BasicDataset
-from .utils import get_max_confidence_and_residual_variance, batch_class_stats
+from .utils import get_max_confidence_and_residual_variance, batch_class_stats, load_diffusion_pipeline, sample_diffusion_data
 
 def get_weights(pred, valid_mask, alpha, epsilon=1e-8):
-    weights = torch.zeros_like(pred[:, 0]) # [B]
+    weight = torch.zeros_like(pred[:, 0]) # [B]
     max_confidence, residual_variance = get_max_confidence_and_residual_variance(pred)
     if valid_mask.sum() > 0:
         means, vars = batch_class_stats(

@@ -36,7 +36,7 @@ accelerate launch generate/train_conditional.py \
   --train_data_dir="generate/cifar10/train" \
   --model_config_name_or_path="generate/config.json" \
   --resolution=32 \
-  --output_dir="generate/pretrained_weights" \
+  --output_dir="generate/pretrained_weights_cifar10" \
   --train_batch_size=1024 \
   --dataloader_num_workers=20 \
   --eval_batch_size=10 \
