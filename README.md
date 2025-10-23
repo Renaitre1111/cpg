@@ -31,7 +31,7 @@ For example,
 ## Results
 
 ## generate
-'''
+```
 accelerate launch generate/train_conditional.py \
   --train_data_dir="generate/cifar10/train" \
   --model_config_name_or_path="generate/config.json" \
@@ -52,8 +52,8 @@ accelerate launch generate/train_conditional.py \
   --num_classes=10 \
   --prediction_type="epsilon" \
   --logger="tensorboard"
-'''
+```
 
-'''
+```
 python generate/sampling.py 
-'''
+```
