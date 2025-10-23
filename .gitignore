@@ -1,0 +1,4 @@
+*.zip
+*.gz
+*.tar
+generate/archive.zip

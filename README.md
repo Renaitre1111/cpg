@@ -32,17 +32,28 @@ For example,
 
 ## generate
 '''
-accelerate launch generate/conditional_diffusion.py \
-    --train_batch_size=256 \
-    --learning_rate=1e-4 \
-    --mixed_precision="fp16" \
-    --num_epochs=300 \
-    --output_dir="pretrain_weights/ddpm-conditional-cifar10" \
-    --use_ema
+accelerate launch generate/train_conditional.py \
+  --train_data_dir="generate/cifar10/train" \
+  --model_config_name_or_path="generate/config.json" \
+  --resolution=32 \
+  --output_dir="generate/pretrained_weights" \
+  --train_batch_size=1024 \
+  --dataloader_num_workers=20 \
+  --eval_batch_size=10 \
+  --num_epochs=2000 \
+  --use_ema \
+  --learning_rate=1e-4 \
+  --lr_warmup_steps=1000 \
+  --mixed_precision="bf16" \
+  --save_images_epochs=20 \
+  --ddpm_beta_schedule="squaredcos_cap_v2" \
+  --checkpointing_steps=1000 \
+  --resume_from_checkpoint="latest" \
+  --num_classes=10 \
+  --prediction_type="epsilon" \
+  --logger="tensorboard"
 '''
+
 '''
-python generate/demo.py \
---ckpt_dir pretrain_weights/ddpm-conditional-cifar10/lr_0.0001_bs_256 \
---num_inference_steps 1000 \
---per_class 2
+python generate/sampling.py 
 '''
