@@ -6,6 +6,7 @@ from diffusers.utils.torch_utils import randn_tensor
 from typing import List, Optional, Tuple, Union
 import math
 from PIL import Image
+import numpy as np
 
 # Reliable Sample Screening Module
 @torch.no_grad()
@@ -89,101 +90,60 @@ def _compute_class_centers(features, class_assignments, num_classes):
     return torch.stack(means), torch.stack(vars)
 
 
-# Diffusion Sampling Module
-class DDPMPipelinenew(DiffusionPipeline):
-    def __init__(self, unet, scheduler, num_classes: int):
-        super.__init__()
-        self.register_modules(unet=unet, scheduler=scheduler)
-        self.num_classes = num_classes
-        self._device = unet.device  # Ensure the pipeline knows the device
+# Unconditional Diffusion Sampling Module
+def load_diffusion(model_id, device="cuda"):
+    unet = UNet2DModel.from_pretrained(model_id).to(device)
+    unet.eval()
+    scheduler = DDPMScheduler.from_pretrained(model_id)
+    return unet, scheduler
+
+def postprocess_image(image_tensor):
+    image = (image_tensor.clone().detach().cpu() + 1) / 2
+    image = image.clamp(0, 1)
+    image = image.permute(0, 2, 3, 1).numpy()
+    image = (image * 255).round().astype(np.uint8)
+    if image.shape[0] == 1:
+        return Image.fromarray(image[0])
+    else:
+        return [Image.fromarray(img) for img in image]
     
-    @torch.no_grad()
-    def __call__(
-        self,
-        batch_size: int = 64,
-        class_labels: Optional[torch.Tensor] = None,
-        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        num_inference_steps: int = 1000,
-        output_type: Optional[str] = "pil",
-        return_dict: bool = True,
-    ) -> Union[ImagePipelineOutput, Tuple]:
-        class_labels = class_labels.to(self._device)
-        if class_labels.ndim == 0:
-            class_labels = class_labels.unsqueeze(0).expand(batch_size)
-        else:
-            class_labels = class_labels.expand(batch_size)
-        
-        # Sample gaussian noise to begin loop
-        if isinstance(self.unet.config.sample_size, int):
-            image_shape = (
-                batch_size,
-                self.unet.config.in_channels,
-                self.unet.config.sample_size,
-                self.unet.config.sample_size,
-            )
-        else:
-            image_shape = (batch_size, self.unet.config.in_channels, *self.unet.config.sample_size)
-
-        image = randn_tensor(image_shape, generator=generator, device=self._device)
-
-        # Set step values
-        self.scheduler.set_timesteps(num_inference_steps)
-
-        for t in self.progress_bar(self.scheduler.timesteps):
-            # Ensure the class labels are correctly broadcast to match the input tensor shape
-            model_output = self.unet(image, t, class_labels).sample
-
-            image = self.scheduler.step(model_output, t, image, generator=generator).prev_sample
-
-        image = (image / 2 + 0.5).clamp(0, 1)
-        image = image.cpu().permute(0, 2, 3, 1).numpy()
-        if output_type == "pil":
-            image = self.numpy_to_pil(image)
-
-        if not return_dict:
-            return (image,)
-
-        return ImagePipelineOutput(images=image)
-    
-def load_diffusion_pipeline(model_path, scheduler_path, num_classes, device):
-    unet = UNet2DModel.from_pretrained(model_path).to(device)
-    scheduler = DDPMScheduler.from_pretrained(scheduler_path)
-    pipeline = DDPMPipelinenew(unet=unet, scheduler=scheduler, num_classes=num_classes)
-    return pipeline.to(device)  # Move the entire pipeline to the device
-
 @torch.no_grad()
-def sample_diffusion_data(pipeline, classes_to_sample, num_samples_per_class: List[int], batch_size=64, num_inference_steps=1000):
-    all_gen_imgs = []
-    all_gen_labels = []
-    device = pipeline.device
+def sample_guided(
+    unet_model, 
+    scheduler,
+    classifier,
+    class_label,
+    batch_size=64,
+    guidance_scale=1.0,
+    num_inference_steps=1000,
+    device="cuda"
+):
+    classifier.eval()
+    scheduler.set_timesteps(num_inference_steps)
 
-    print(f"sampling for {len(classes_to_sample)} classes")
+    image_shape = (batch_size, unet_model.config.in_channels, unet_model.config.sample_size, unet_model.config.sample_size)
+    xt = torch.randn(image_shape, device=device)
+    class_labels = torch.full((batch_size,), class_label, dtype=torch.long, device=device)
 
-    for class_label, num_samples in zip(classes_to_sample, num_samples_per_class):
-        if num_samples <= 0:
-            continue
+    for t in scheduler.timesteps:
+        with torch.enable_grad():
+            xt_grad = xt.detach().requires_grad_(True)
 
-        num_generated = 0
-        num_batches = math.ceil(num_samples / batch_size)
-        for i in range(num_batches):
-            current_batch_size = min(batch_size, num_samples - num_generated)
-            if current_batch_size <= 0:
-                continue
-            labels = torch.tensor([class_label] * current_batch_size, device=device, dtype=torch.long)
-            imgs_output = pipeline(
-                batch_siz=current_batch_size,
-                class_labels=labels,
-                num_inference_steps=num_inference_steps,
-                output_type="pil"
-            )
+            noise_pred = unet_model(xt_grad, t).sample
+            x0_pred = scheduler.step(noise_pred, t, xt_grad).pred_original_sample
 
-            gen_imgs_batch = imgs_output.images
-
-            all_gen_imgs.extend(gen_imgs_batch)
-            all_gen_labels.extend([class_label] * current_batch_size)
-            num_generated += current_batch_size
+            logits = classifier(x0_pred)
+            loss = F.cross_entropy(logits, class_labels)
+            grad = torch.autograd.grad(loss, xt_grad)[0]
         
-    return all_gen_imgs, all_gen_labels
-
+        noise_pred_uncond = unet_model(xt, t).sample
         
+        std_dev_t = (1.0 - scheduler.alphas_cumprod[t]).sqrt()
+
+        guided_noise_pred = noise_pred_uncond - guidance_scale * std_dev_t * grad
+
+        xt = scheduler.step(guided_noise_pred, t, xt).prev_sample
+    
+    pil_images = postprocess_image(xt)
+    return pil_images
 
